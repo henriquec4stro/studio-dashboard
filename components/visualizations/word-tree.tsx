@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import **as d3 from 'd3';
+import * as d3 from 'd3';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Maximize2, Minimize2, RotateCcw, Zap, Target } from "lucide-react";
