@@ -1,458 +1,390 @@
 "use client"
 
-import { useEffect, useRef, useState, useCallback } from "react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
-import { Maximize2, Minimize2, RotateCcw, Zap, Target } from "lucide-react"
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import **as d3 from 'd3';
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Maximize2, Minimize2, RotateCcw, Zap, Target } from "lucide-react";
 
+// Assuming wordTreeStore.ts is correctly pathed, e.g., from '@/store/wordTreeStore'
+// Ensure WordNode and Settings are exported from your store file.
+import { useWordTreeStore, WordNode as StoreWordNode, Settings as StoreSettings } from '@/store/wordTreeStore';
+
+// Interface for text fragments, consistent with your original definition
 interface TextFragment {
-  before: string[]
-  after: string[]
-  fullSentence: string
-  position: number
-}
-
-interface TreeNode {
-  text: string
-  frequency: number
-  children: TreeNode[]
-  level: number
-  x?: number
-  y?: number
-  width?: number
-  height?: number
-  color?: string
-  fontSize?: number
+  before: string[];
+  after: string[];
+  fullSentence: string;
+  position: number;
 }
 
 interface WordTreeProps {
-  data: Array<{ word: string; count: number; sentiment?: { category: string; score: number } }>
-  width: number
-  height: number
-  enableSentiment: boolean
-  originalText?: string
+  initialWidth?: number; // Changed from width to initialWidth
+  initialHeight?: number; // Changed from height to initialHeight
+  originalText?: string;
+  // enableSentiment is not used by WordTree.tsx's logic, consider removing or implementing separately
 }
 
-export function WordTree({ data, width, height, enableSentiment, originalText = "" }: WordTreeProps) {
-  const svgRef = useRef<SVGSVGElement>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const [selectedWord, setSelectedWord] = useState<string>("")
-  const [availableWords, setAvailableWords] = useState<string[]>([])
-  const [treeStructure, setTreeStructure] = useState<TreeNode | null>(null)
-  const [isFullscreen, setIsFullscreen] = useState(false)
-  const [hoveredNode, setHoveredNode] = useState<string | null>(null)
-  const [dimensions, setDimensions] = useState({ width: width, height: height })
+export function WordTree({
+  initialWidth = 800, // Default initial width
+  initialHeight = 600, // Default initial height
+  originalText = ""
+}: WordTreeProps) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null); // For dynamic sizing
 
-  // Enhanced text fragment extraction
+  // Zustand store integration
+  const {
+    treeData,
+    settings,
+    searchTerm,
+    highlightedWords,
+    isExplorationMode,
+    addToExplorationPath,
+    setTreeData,
+    // updateSettings, // If you add UI to change settings
+    setSearchTerm,
+    // setHighlightedWords, // If you add UI to highlight specific words beyond search
+    // toggleExplorationMode, // If you add UI for this
+  } = useWordTreeStore();
+
+  const [selectedWordLocal, setSelectedWordLocal] = useState<string>("");
+  const [availableWords, setAvailableWords] = useState<string[]>([]);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Default visualization dimensions, can be overridden by fullscreen or container size
+  const D3_VIZ_WIDTH = 800;
+  const D3_VIZ_HEIGHT = 600;
+
+  // Text fragment extraction (from your original word-tree.tsx)
   const extractFragments = useCallback((text: string, targetWord: string): TextFragment[] => {
-    if (!text || !targetWord) return []
+    if (!text || !targetWord) return [];
 
-    const fragments: TextFragment[] = []
+    const fragments: TextFragment[] = [];
     const sentences = text
       .replace(/[.!?]+/g, ".|")
       .split("|")
       .map((s) => s.trim())
-      .filter((s) => s.length > 0)
+      .filter((s) => s.length > 0);
 
-    const targetLower = targetWord.toLowerCase()
+    const targetLower = targetWord.toLowerCase();
 
     sentences.forEach((sentence, sentenceIndex) => {
-      const words = sentence.split(/\s+/).filter((w) => w.length > 0)
-
+      const words = sentence.split(/\s+/).filter((w) => w.length > 0);
       words.forEach((word, index) => {
-        const cleanWord = word.toLowerCase().replace(/[^\w]/g, "")
+        const cleanWord = word.toLowerCase().replace(/[^\w]/g, "");
         if (cleanWord === targetLower || cleanWord.includes(targetLower)) {
-          const before = words.slice(Math.max(0, index - 4), index)
-          const after = words.slice(index + 1, Math.min(words.length, index + 6))
-
+          const before = words.slice(Math.max(0, index - 4), index);
+          const after = words.slice(index + 1, Math.min(words.length, index + 6));
           if (after.length > 0) {
             fragments.push({
               before,
               after,
               fullSentence: sentence,
               position: sentenceIndex * 1000 + index,
-            })
+            });
           }
         }
-      })
-    })
+      });
+    });
+    return fragments;
+  }, []);
 
-    return fragments
-  }, [])
-
-  // Enhanced tree building with better hierarchy
-  const buildTree = useCallback((fragments: TextFragment[], targetWord: string): TreeNode => {
-    const root: TreeNode = {
-      text: targetWord,
-      frequency: fragments.length,
+  // Tree building logic (from your original word-tree.tsx, adapted to output StoreWordNode)
+  const buildTreeFromFragments = useCallback((fragments: TextFragment[], targetWord: string): StoreWordNode => {
+    const rootNode: StoreWordNode = {
+      word: targetWord,
+      count: fragments.length,
       children: [],
-      level: 0,
-      color: "#1a1a1a",
-      fontSize: 48,
-    }
+    };
 
-    // Group fragments by first word after target
-    const firstWordGroups = new Map<string, TextFragment[]>()
-
+    const firstWordGroups = new Map<string, TextFragment[]>();
     fragments.forEach((fragment) => {
       if (fragment.after.length > 0) {
-        const firstWord = fragment.after[0].toLowerCase().replace(/[^\w]/g, "")
-        if (firstWord && firstWord.length > 1) {
+        const firstWord = fragment.after[0].toLowerCase().replace(/[^\w]/g, "");
+        if (firstWord && firstWord.length > 1) { // Ensure meaningful words
           if (!firstWordGroups.has(firstWord)) {
-            firstWordGroups.set(firstWord, [])
+            firstWordGroups.set(firstWord, []);
           }
-          firstWordGroups.get(firstWord)!.push(fragment)
+          firstWordGroups.get(firstWord)!.push(fragment);
         }
       }
-    })
+    });
 
-    // Create first level children
     Array.from(firstWordGroups.entries())
       .sort((a, b) => b[1].length - a[1].length)
-      .slice(0, 8)
+      .slice(0, 8) // Limit to top N children for clarity, adjust as needed
       .forEach(([firstWord, groupFragments]) => {
-        const childNode: TreeNode = {
-          text: firstWord,
-          frequency: groupFragments.length,
+        const childNode: StoreWordNode = {
+          word: firstWord,
+          count: groupFragments.length,
           children: [],
-          level: 1,
-          color: "#2563eb",
-          fontSize: Math.max(16, Math.min(32, 16 + (groupFragments.length / fragments.length) * 16)),
-        }
+        };
 
-        // Group by second word for sub-branches
-        const secondWordGroups = new Map<string, TextFragment[]>()
+        const secondWordGroups = new Map<string, TextFragment[]>();
         groupFragments.forEach((fragment) => {
           if (fragment.after.length > 1) {
-            const secondWord = fragment.after[1].toLowerCase().replace(/[^\w]/g, "")
-            if (secondWord && secondWord.length > 1) {
+            const secondWord = fragment.after[1].toLowerCase().replace(/[^\w]/g, "");
+            if (secondWord && secondWord.length > 1) { // Ensure meaningful words
               if (!secondWordGroups.has(secondWord)) {
-                secondWordGroups.set(secondWord, [])
+                secondWordGroups.set(secondWord, []);
               }
-              secondWordGroups.get(secondWord)!.push(fragment)
+              secondWordGroups.get(secondWord)!.push(fragment);
             }
           }
-        })
+        });
 
-        // Create second level children
         Array.from(secondWordGroups.entries())
           .sort((a, b) => b[1].length - a[1].length)
-          .slice(0, 4)
+          .slice(0, 4) // Limit sub-children
           .forEach(([secondWord, subFragments]) => {
-            childNode.children.push({
-              text: secondWord,
-              frequency: subFragments.length,
-              children: [],
-              level: 2,
-              color: "#64748b",
-              fontSize: Math.max(12, Math.min(20, 12 + (subFragments.length / groupFragments.length) * 8)),
-            })
-          })
+            childNode.children?.push({
+              word: secondWord,
+              count: subFragments.length,
+              children: [], // Can be extended for more depth
+            });
+          });
+        rootNode.children?.push(childNode);
+      });
+    return rootNode;
+  }, []);
 
-        root.children.push(childNode)
-      })
-
-    return root
-  }, [])
-
-  // Enhanced layout calculation with better spacing
-  const calculateLayout = useCallback((tree: TreeNode, containerWidth: number, containerHeight: number) => {
-    const margin = 60
-    const levelSpacing = Math.max(180, containerWidth / 6)
-    const nodeSpacing = Math.max(40, containerHeight / 15)
-
-    const assignPositions = (node: TreeNode, x: number, y: number, availableHeight: number) => {
-      node.x = x
-      node.y = y
-
-      if (node.children.length === 0) return availableHeight
-
-      const totalChildren = node.children.length
-      const childHeight = nodeSpacing
-      const totalHeight = totalChildren * childHeight
-      const startY = y - totalHeight / 2
-
-      let currentY = startY
-      node.children.forEach((child, index) => {
-        const childY = currentY + index * childHeight
-        const childX = x + levelSpacing
-
-        assignPositions(child, childX, childY, childHeight)
-        currentY = childY
-      })
-
-      return totalHeight
-    }
-
-    // Center the root node
-    const rootX = margin + 100
-    const rootY = containerHeight / 2
-
-    assignPositions(tree, rootX, rootY, containerHeight - 2 * margin)
-  }, [])
-
-  // Enhanced rendering with beautiful visuals
-  const renderTree = useCallback(() => {
-    if (!treeStructure || !svgRef.current) return
-
-    const svg = svgRef.current
-    const containerWidth = dimensions.width
-    const containerHeight = dimensions.height
-
-    // Clear previous content
-    svg.innerHTML = ""
-
-    // Set SVG attributes
-    svg.setAttribute("width", containerWidth.toString())
-    svg.setAttribute("height", containerHeight.toString())
-    svg.setAttribute("viewBox", `0 0 ${containerWidth} ${containerHeight}`)
-
-    // Create gradient definitions
-    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs")
-
-    // Connection gradient
-    const gradient = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient")
-    gradient.setAttribute("id", "connectionGradient")
-    gradient.setAttribute("x1", "0%")
-    gradient.setAttribute("y1", "0%")
-    gradient.setAttribute("x2", "100%")
-    gradient.setAttribute("y2", "0%")
-
-    const stop1 = document.createElementNS("http://www.w3.org/2000/svg", "stop")
-    stop1.setAttribute("offset", "0%")
-    stop1.setAttribute("stop-color", "#3b82f6")
-    stop1.setAttribute("stop-opacity", "0.8")
-
-    const stop2 = document.createElementNS("http://www.w3.org/2000/svg", "stop")
-    stop2.setAttribute("offset", "100%")
-    stop2.setAttribute("stop-color", "#8b5cf6")
-    stop2.setAttribute("stop-opacity", "0.4")
-
-    gradient.appendChild(stop1)
-    gradient.appendChild(stop2)
-    defs.appendChild(gradient)
-    svg.appendChild(defs)
-
-    // Add background
-    const background = document.createElementNS("http://www.w3.org/2000/svg", "rect")
-    background.setAttribute("width", "100%")
-    background.setAttribute("height", "100%")
-    background.setAttribute("fill", "url(#backgroundGradient)")
-
-    const bgGradient = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient")
-    bgGradient.setAttribute("id", "backgroundGradient")
-    bgGradient.setAttribute("x1", "0%")
-    bgGradient.setAttribute("y1", "0%")
-    bgGradient.setAttribute("x2", "100%")
-    bgGradient.setAttribute("y2", "100%")
-
-    const bgStop1 = document.createElementNS("http://www.w3.org/2000/svg", "stop")
-    bgStop1.setAttribute("offset", "0%")
-    bgStop1.setAttribute("stop-color", "#fefefe")
-
-    const bgStop2 = document.createElementNS("http://www.w3.org/2000/svg", "stop")
-    bgStop2.setAttribute("offset", "100%")
-    bgStop2.setAttribute("stop-color", "#f8fafc")
-
-    bgGradient.appendChild(bgStop1)
-    bgGradient.appendChild(bgStop2)
-    defs.appendChild(bgGradient)
-    background.setAttribute("fill", "url(#backgroundGradient)")
-    svg.appendChild(background)
-
-    // Calculate layout
-    calculateLayout(treeStructure, containerWidth, containerHeight)
-
-    // Render connections first (so they appear behind text)
-    const renderConnections = (node: TreeNode) => {
-      if (!node.x || !node.y) return
-
-      node.children.forEach((child) => {
-        if (child.x && child.y) {
-          // Create curved connection
-          const path = document.createElementNS("http://www.w3.org/2000/svg", "path")
-          const startX = node.x + node.text.length * (node.fontSize || 20) * 0.4
-          const startY = node.y
-          const endX = child.x - 20
-          const endY = child.y
-          const midX = startX + (endX - startX) * 0.6
-
-          const pathData = `M ${startX} ${startY} Q ${midX} ${startY} ${endX} ${endY}`
-          path.setAttribute("d", pathData)
-          path.setAttribute("stroke", "url(#connectionGradient)")
-          path.setAttribute("stroke-width", Math.max(1, child.frequency / 2).toString())
-          path.setAttribute("fill", "none")
-          path.setAttribute("opacity", "0.6")
-
-          svg.appendChild(path)
-        }
-        renderConnections(child)
-      })
-    }
-
-    // Render text nodes
-    const renderNode = (node: TreeNode) => {
-      if (!node.x || !node.y) return
-
-      // Create group for node
-      const group = document.createElementNS("http://www.w3.org/2000/svg", "g")
-      group.style.cursor = "pointer"
-      group.setAttribute("data-word", node.text)
-
-      // Add background for root node
-      if (node.level === 0) {
-        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect")
-        const padding = 20
-        const textWidth = node.text.length * (node.fontSize || 20) * 0.6
-        const textHeight = node.fontSize || 20
-
-        rect.setAttribute("x", (node.x - padding).toString())
-        rect.setAttribute("y", (node.y - textHeight / 2 - padding / 2).toString())
-        rect.setAttribute("width", (textWidth + padding * 2).toString())
-        rect.setAttribute("height", (textHeight + padding).toString())
-        rect.setAttribute("fill", "#f8fafc")
-        rect.setAttribute("stroke", "#e2e8f0")
-        rect.setAttribute("stroke-width", "2")
-        rect.setAttribute("rx", "12")
-        rect.setAttribute("opacity", "0.9")
-        group.appendChild(rect)
-      }
-
-      // Create text element
-      const text = document.createElementNS("http://www.w3.org/2000/svg", "text")
-      text.setAttribute("x", node.x.toString())
-      text.setAttribute("y", node.y.toString())
-      text.setAttribute("font-size", (node.fontSize || 16).toString())
-      text.setAttribute("font-weight", node.level === 0 ? "900" : node.level === 1 ? "700" : "600")
-      text.setAttribute("fill", node.color || "#333")
-      text.setAttribute("dominant-baseline", "middle")
-      text.setAttribute("text-anchor", node.level === 0 ? "middle" : "start")
-      text.setAttribute("font-family", "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif")
-      text.textContent = node.text
-
-      // Add frequency badge for non-root nodes
-      if (node.level > 0 && node.frequency > 1) {
-        const badge = document.createElementNS("http://www.w3.org/2000/svg", "text")
-        badge.setAttribute("x", (node.x + node.text.length * (node.fontSize || 16) * 0.6 + 10).toString())
-        badge.setAttribute("y", (node.y - 5).toString())
-        badge.setAttribute("font-size", "10")
-        badge.setAttribute("font-weight", "600")
-        badge.setAttribute("fill", "#6b7280")
-        badge.setAttribute("dominant-baseline", "middle")
-        badge.setAttribute("text-anchor", "start")
-        badge.textContent = `×${node.frequency}`
-        group.appendChild(badge)
-      }
-
-      // Add hover effects
-      group.addEventListener("mouseenter", () => {
-        text.setAttribute("fill", "#2563eb")
-        text.setAttribute("font-weight", (Number.parseInt(text.getAttribute("font-weight") || "400") + 100).toString())
-        setHoveredNode(node.text)
-      })
-
-      group.addEventListener("mouseleave", () => {
-        text.setAttribute("fill", node.color || "#333")
-        text.setAttribute("font-weight", node.level === 0 ? "900" : node.level === 1 ? "700" : "600")
-        setHoveredNode(null)
-      })
-
-      // Add click handler for word selection
-      group.addEventListener("click", () => {
-        if (node.level > 0) {
-          setSelectedWord(node.text)
-        }
-      })
-
-      // Add tooltip
-      const title = document.createElementNS("http://www.w3.org/2000/svg", "title")
-      title.textContent = `"${node.text}" appears ${node.frequency} time${node.frequency !== 1 ? "s" : ""} in this context`
-      group.appendChild(title)
-
-      group.appendChild(text)
-      svg.appendChild(group)
-
-      // Render children
-      node.children.forEach(renderNode)
-    }
-
-    // Render connections first, then nodes
-    renderConnections(treeStructure)
-    renderNode(treeStructure)
-
-    // Add title
-    const titleText = document.createElementNS("http://www.w3.org/2000/svg", "text")
-    titleText.setAttribute("x", "30")
-    titleText.setAttribute("y", "40")
-    titleText.setAttribute("font-size", "18")
-    titleText.setAttribute("font-weight", "700")
-    titleText.setAttribute("fill", "#1f2937")
-    titleText.textContent = `Contextos de "${selectedWord}"`
-    svg.appendChild(titleText)
-
-    // Add instructions
-    const instructionText = document.createElementNS("http://www.w3.org/2000/svg", "text")
-    instructionText.setAttribute("x", "30")
-    instructionText.setAttribute("y", containerHeight - 30)
-    instructionText.setAttribute("font-size", "12")
-    instructionText.setAttribute("font-weight", "500")
-    instructionText.setAttribute("fill", "#6b7280")
-    instructionText.textContent = "Tamanhos das fontes indicam frequência • Clique nas palavras para explorar"
-    svg.appendChild(instructionText)
-  }, [treeStructure, dimensions, selectedWord, calculateLayout])
-
-  // Handle fullscreen toggle
-  const toggleFullscreen = useCallback(() => {
-    if (!isFullscreen) {
-      setDimensions({ width: window.innerWidth - 40, height: window.innerHeight - 40 })
-    } else {
-      setDimensions({ width: width, height: height })
-    }
-    setIsFullscreen(!isFullscreen)
-  }, [isFullscreen, width, height])
-
-  // Initialize available words
+  // Effect to update treeData in store when selectedWordLocal or originalText changes
   useEffect(() => {
-    if (data.length > 0) {
-      const words = data.slice(0, 20).map((d) => d.word)
-      setAvailableWords(words)
-
-      if (!selectedWord && words.length > 0) {
-        setSelectedWord(words[0])
-      }
-    }
-  }, [data, selectedWord])
-
-  // Build tree when word or text changes
-  useEffect(() => {
-    if (selectedWord && originalText) {
-      const fragments = extractFragments(originalText, selectedWord)
+    if (selectedWordLocal && originalText) {
+      setSearchTerm(selectedWordLocal); // Keep searchTerm in sync
+      const fragments = extractFragments(originalText, selectedWordLocal);
       if (fragments.length > 0) {
-        const tree = buildTree(fragments, selectedWord)
-        setTreeStructure(tree)
+        const newTreeData = buildTreeFromFragments(fragments, selectedWordLocal);
+        setTreeData(newTreeData);
+      } else {
+        setTreeData(null);
       }
+    } else {
+      setTreeData(null); // Clear tree if no word selected or no text
     }
-  }, [selectedWord, originalText, extractFragments, buildTree])
+  }, [selectedWordLocal, originalText, extractFragments, buildTreeFromFragments, setTreeData, setSearchTerm]);
 
-  // Render tree when structure or dimensions change
+  // Highlighting logic from WordTree.tsx
+  const isWordHighlighted = (word: string) => {
+    return highlightedWords.has(word.toLowerCase()) ||
+           (searchTerm && word.toLowerCase().includes(searchTerm.toLowerCase()));
+  };
+
+  // D3 Rendering Effect (adapted from WordTree.tsx)
   useEffect(() => {
-    if (treeStructure) {
-      // Small delay to ensure DOM is ready
-      const timer = setTimeout(renderTree, 100)
-      return () => clearTimeout(timer)
+    if (!svgRef.current) return;
+
+    const svg = d3.select(svgRef.current);
+
+    if (!treeData) {
+      svg.selectAll("*").remove(); // Clear SVG if no data
+      return;
     }
-  }, [treeStructure, renderTree])
+    svg.selectAll("*").remove(); // Clear previous rendering
 
-  // Handle window resize in fullscreen
-  useEffect(() => {
+    let currentWidth = D3_VIZ_WIDTH;
+    let currentHeight = D3_VIZ_HEIGHT;
+
     if (isFullscreen) {
-      const handleResize = () => {
-        setDimensions({ width: window.innerWidth - 40, height: window.innerHeight - 40 })
-      }
-      window.addEventListener("resize", handleResize)
-      return () => window.removeEventListener("resize", handleResize)
+        currentWidth = window.innerWidth - (containerRef.current ? containerRef.current.offsetLeft * 2 : 40);
+        currentHeight = window.innerHeight - (containerRef.current ? containerRef.current.offsetTop : 40) - 20;
+    } else if (containerRef.current) {
+        currentWidth = containerRef.current.clientWidth || D3_VIZ_WIDTH;
+        // Use a fixed height or derive from props/container for non-fullscreen
+        currentHeight = initialHeight;
     }
-  }, [isFullscreen])
+
+
+    const margin = { top: 40, right: 90, bottom: 40, left: 90 }; // Adjusted margins
+
+    svg.attr("width", currentWidth).attr("height", currentHeight);
+
+    const g = svg.append("g")
+      .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    const d3TreeLayout = d3.tree<StoreWordNode>()
+      .size([currentHeight - margin.top - margin.bottom, currentWidth - margin.left - margin.right]);
+
+    const hierarchy = d3.hierarchy(treeData);
+    const treeLayoutData = d3TreeLayout(hierarchy);
+
+    // Links
+    g.selectAll('.link')
+      .data(treeLayoutData.links())
+      .enter()
+      .append('path')
+      .attr('class', 'link')
+      .attr('d', d3.linkHorizontal<any, d3.HierarchyPointNode<StoreWordNode>>()
+        .x(d => d.y) // Tree is horizontal: y position becomes x-coordinate
+        .y(d => d.x)) // Tree is horizontal: x position becomes y-coordinate
+      .style('fill', 'none')
+      .style('stroke', (d, i) => {
+        const isHighlighted = isWordHighlighted(d.target.data.word) || isWordHighlighted(d.source.data.word);
+        return isHighlighted ? '#ff6b6b' : d3.interpolateRainbow(i / treeLayoutData.links().length);
+      })
+      .style('stroke-width', d => {
+        const isHighlighted = isWordHighlighted(d.target.data.word) || isWordHighlighted(d.source.data.word);
+        const baseWidth = Math.max(1, d.target.data.count * settings.linkThickness);
+        return isHighlighted ? baseWidth * 1.5 : baseWidth; // Adjusted multiplier
+      })
+      .style('opacity', d => {
+        const isHighlighted = isWordHighlighted(d.target.data.word) || isWordHighlighted(d.source.data.word);
+        return isHighlighted ? 1 : (searchTerm || highlightedWords.size > 0 ? 0.3 : 0.7); // Adjusted opacity
+      })
+      .style('transition', 'all 0.3s ease');
+
+    // Nodes
+    const nodes = g.selectAll('.node')
+      .data(treeLayoutData.descendants() as d3.HierarchyPointNode<StoreWordNode>[])
+      .enter()
+      .append('g')
+      .attr('class', d => `node ${d.children ? "node--internal" : "node--leaf"}`)
+      .attr('transform', d => `translate(${d.y},${d.x})`) // y for x-pos, x for y-pos
+      .style('cursor', 'pointer');
+
+    nodes.append('circle')
+      .attr('r', d => {
+        const isHighlighted = isWordHighlighted(d.data.word);
+        const baseSize = Math.max(settings.nodeSize * 1.5, d.data.count * settings.nodeSize * 0.5); // Adjusted sizing
+        return isHighlighted ? baseSize * 1.5 : baseSize;
+      })
+      .style('fill', (d, i) => {
+        const isHighlighted = isWordHighlighted(d.data.word);
+        if (isHighlighted) return '#ff6b6b';
+        return d.children ? d3.interpolateBlues(0.6) : d3.interpolateGreens(0.6); // Different color for parent/leaf
+      })
+      .style('stroke', d => isWordHighlighted(d.data.word) ? '#ff4757' : '#555')
+      .style('stroke-width', d => isWordHighlighted(d.data.word) ? 2.5 : 1.5)
+      .style('opacity', d => {
+        const isHighlighted = isWordHighlighted(d.data.word);
+        return isHighlighted ? 1 : (searchTerm || highlightedWords.size > 0 ? 0.5 : 1);
+      })
+      .style('transition', 'all 0.3s ease')
+      .on('click', function(event, dNode) {
+        if (isExplorationMode) {
+          addToExplorationPath(dNode.data.word);
+          d3.select(this).transition().duration(150)
+            .attr('r', prevR => +prevR * 1.5) // Use +prevR to ensure number
+            .transition().duration(150)
+            .attr('r', prevR => +prevR / 1.5);
+        } else {
+          // If not in exploration mode, clicking a child node could set it as the new selectedWordLocal
+          if (dNode.data.word !== selectedWordLocal) { // Avoid re-selecting the root
+             setSelectedWordLocal(dNode.data.word);
+          }
+        }
+      })
+      .on('mouseover', function(event, dNode) {
+        d3.select(this).transition().duration(150)
+          .attr('r', prevR => +prevR * 1.2)
+          .style('stroke-width', 2.5);
+        
+        d3.selectAll('.tooltip').remove(); // Clear existing tooltips
+        const tooltip = d3.select('body').append('div')
+          .attr('class', 'tooltip') // Ensure this class is styled (e.g., in global CSS)
+          .style('position', 'absolute')
+          .style('background', 'rgba(0,0,0,0.85)')
+          .style('color', 'white')
+          .style('padding', '10px')
+          .style('border-radius', '5px')
+          .style('pointer-events', 'none')
+          .style('font-size', '13px')
+          .style('z-index', '1050') // Ensure tooltip is on top
+          .style('opacity', 0) // Start hidden for transition
+          .html(`<strong>${dNode.data.word}</strong><br/>Frequência: ${dNode.data.count}<br/>${isExplorationMode ? 'Clique para adicionar ao caminho' : (dNode.data.word !== selectedWordLocal ? 'Clique para explorar esta palavra' : 'Palavra raiz')}`);
+        
+        tooltip.transition().duration(200).style('opacity', .9);
+        tooltip.style('left', (event.pageX + 15) + 'px')
+               .style('top', (event.pageY - 20) + 'px');
+      })
+      .on('mouseout', function(event, dNode) {
+        d3.select(this).transition().duration(150)
+          .attr('r', prevR => +prevR / 1.2) // Revert to original dynamic size
+          .style('stroke-width', isWordHighlighted(dNode.data.word) ? 2.5 : 1.5);
+        d3.selectAll('.tooltip').transition().duration(200).style('opacity', 0).remove();
+      });
+
+    // Text labels
+    nodes.append('text')
+      .attr('dy', '0.31em')
+      .attr('x', d => d.children ? - (Math.max(settings.nodeSize * 1.5, d.data.count * settings.nodeSize * 0.5) + 5) : (Math.max(settings.nodeSize * 1.5, d.data.count * settings.nodeSize * 0.5) + 5))
+      .attr('text-anchor', d => d.children ? 'end' : 'start')
+      .style('font-size', d => {
+        const isHighlighted = isWordHighlighted(d.data.word);
+        const baseSize = Math.max(10, Math.min(20, d.data.count * settings.fontSize * 0.8)); // Clamp font size
+        return (isHighlighted ? baseSize * 1.15 : baseSize) + 'px';
+      })
+      .style('font-weight', d => isWordHighlighted(d.data.word) || d.data.word === selectedWordLocal ? 'bold' : 'normal')
+      .style('fill', d => isWordHighlighted(d.data.word) ? '#d63031' : '#333') // Darker highlight color
+      .style('opacity', d => {
+        const isHighlighted = isWordHighlighted(d.data.word);
+        return isHighlighted ? 1 : (searchTerm || highlightedWords.size > 0 ? 0.6 : 1);
+      })
+      .text(d => d.data.word);
+
+    // Zoom behavior
+    const zoom = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.2, 3]) // Adjusted scale extent
+      .on('zoom', (event) => {
+        g.attr('transform', event.transform);
+      });
+    svg.call(zoom);
+
+  }, [
+      treeData, settings, searchTerm, highlightedWords, isExplorationMode, addToExplorationPath,
+      isFullscreen, initialHeight, selectedWordLocal // Dependencies for D3 rerender
+  ]);
+
+  // Fullscreen toggle
+  const toggleFullscreen = useCallback(() => {
+    setIsFullscreen(!isFullscreen);
+  }, [isFullscreen]);
+
+  // Initialize or update available words from originalText
+  useEffect(() => {
+    if (originalText) {
+      const words = originalText.toLowerCase().match(/\b(\w{3,})\b/g) || []; // Min 3 letter words
+      const wordCounts: Record<string, number> = {};
+      words.forEach(word => {
+        wordCounts[word] = (wordCounts[word] || 0) + 1;
+      });
+      const sortedWords = Object.entries(wordCounts)
+        .filter(([, count]) => count > 1) // Only words appearing more than once
+        .sort((a, b) => b[1] - a[1])
+        .map(([word]) => word);
+      
+      setAvailableWords(sortedWords);
+      if (!selectedWordLocal && sortedWords.length > 0) {
+        setSelectedWordLocal(sortedWords[0]);
+      } else if (sortedWords.length === 0 && selectedWordLocal) {
+        // If current selected word is no longer available, clear it
+        setSelectedWordLocal("");
+      }
+    } else {
+      setAvailableWords([]);
+      setSelectedWordLocal("");
+    }
+  }, [originalText]); // Rerun only if originalText changes
+
+  // Handle word selection from buttons
+  const handleWordSelection = (word: string) => {
+    setSelectedWordLocal(word);
+  };
+  
+  // Refresh handler
+  const handleRefresh = () => {
+    if (selectedWordLocal && originalText) {
+      setSearchTerm(selectedWordLocal);
+      const fragments = extractFragments(originalText, selectedWordLocal);
+      if (fragments.length > 0) {
+        const newTreeData = buildTreeFromFragments(fragments, selectedWordLocal);
+        setTreeData(newTreeData);
+      } else {
+        setTreeData(null);
+      }
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -460,124 +392,109 @@ export function WordTree({ data, width, height, enableSentiment, originalText = 
       <Card className="bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200 shadow-lg">
         <CardContent className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-bold text-gray-800">Selecione uma palavra para explorar seus contextos</h3>
+            <h3 className="text-lg font-bold text-gray-800">Selecione uma palavra para explorar contextos</h3>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={toggleFullscreen} className="rounded-xl">
-                {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                {isFullscreen ? <Minimize2 className="h-4 w-4 mr-1" /> : <Maximize2 className="h-4 w-4 mr-1" />}
                 {isFullscreen ? "Sair" : "Tela Cheia"}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => renderTree()} className="rounded-xl">
-                <RotateCcw className="h-4 w-4" />
+              <Button variant="outline" size="sm" onClick={handleRefresh} className="rounded-xl">
+                <RotateCcw className="h-4 w-4 mr-1" />
                 Atualizar
               </Button>
             </div>
           </div>
-
           <div className="flex flex-wrap gap-3">
-            {availableWords.slice(0, 15).map((word) => (
+            {availableWords.length > 0 ? availableWords.slice(0, 15).map((word) => (
               <button
                 key={word}
-                onClick={() => setSelectedWord(word)}
+                onClick={() => handleWordSelection(word)}
                 className={`px-4 py-2 rounded-xl font-semibold transition-all duration-200 transform hover:scale-105 ${
-                  selectedWord === word
+                  selectedWordLocal === word
                     ? "bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-lg scale-105"
                     : "bg-white text-gray-700 hover:bg-gray-50 border border-gray-200 hover:border-gray-300 shadow-md"
                 }`}
               >
                 {word}
               </button>
-            ))}
+            )) : <p className="text-sm text-gray-500">Nenhuma palavra frequente encontrada no texto fornecido.</p>}
           </div>
         </CardContent>
       </Card>
 
       {/* Tree Visualization */}
-      <div className={`${isFullscreen ? "fixed inset-0 z-50 bg-white p-5" : "relative"}`}>
-        <Card className={`shadow-2xl border-0 bg-white ${isFullscreen ? "h-full" : ""}`}>
-          <CardContent className="p-0">
+      <div className={`${isFullscreen ? "fixed inset-0 z-[1040] bg-white p-5 flex flex-col" : "relative"}`}>
+        <Card className={`shadow-2xl border-0 bg-white ${isFullscreen ? "flex-grow" : ""}`}>
+          <CardContent className={`p-0 ${isFullscreen ? "h-full" : ""}`}>
             <div
               ref={containerRef}
-              className={`relative overflow-hidden bg-gradient-to-br from-gray-50 to-white ${
+              className={`relative overflow-hidden bg-gradient-to-br from-gray-50 to-slate-50 ${
                 isFullscreen ? "h-full rounded-2xl" : "rounded-2xl"
               }`}
-              style={{
-                width: dimensions.width,
-                height: dimensions.height,
-                minHeight: isFullscreen ? "100%" : "600px",
-              }}
+              style={!isFullscreen ? { width: '100%', height: `${initialHeight}px`, minHeight: `${initialHeight}px` } : {}}
             >
-              {!treeStructure && (
+              {!treeData && selectedWordLocal && (
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="text-center">
+                  <div className="text-center p-5">
+                    <Zap className="h-16 w-16 mx-auto mb-4 text-gray-300" />
+                    <p className="text-xl font-semibold text-gray-500">
+                      Gerando visualização para "{selectedWordLocal}"...
+                    </p>
+                     <p className="text-sm text-gray-400">Se demorar, verifique o texto ou a palavra selecionada.</p>
+                  </div>
+                </div>
+              )}
+               {!selectedWordLocal && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="text-center p-5">
                     <Target className="h-16 w-16 mx-auto mb-4 text-gray-300" />
                     <p className="text-xl font-semibold text-gray-500">
-                      Selecione uma palavra para ver a árvore contextual
+                      Selecione uma palavra acima para visualizar a árvore contextual.
                     </p>
                   </div>
                 </div>
               )}
-
               <svg
                 ref={svgRef}
-                className="w-full h-full"
-                style={{
-                  fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-                  background: "transparent",
-                }}
+                className="w-full h-full" // D3 controls size attributes directly
+                style={{ fontFamily: "system-ui, sans-serif", background: "transparent" }}
               />
-
-              {/* Floating info panel */}
-              {hoveredNode && (
-                <div className="absolute top-4 right-4 bg-black/90 text-white px-4 py-2 rounded-xl text-sm shadow-xl">
-                  <div className="flex items-center gap-2">
-                    <Zap className="h-4 w-4" />
-                    <span className="font-semibold">Palavra em foco: {hoveredNode}</span>
-                  </div>
-                </div>
-              )}
-
-              {/* Fullscreen indicator */}
-              {isFullscreen && (
-                <div className="absolute bottom-4 left-4 bg-blue-600 text-white px-3 py-1 rounded-lg text-xs font-semibold">
-                  Modo Tela Cheia
-                </div>
-              )}
             </div>
           </CardContent>
         </Card>
       </div>
 
       {/* Context Information */}
-      {selectedWord && treeStructure && (
+      {selectedWordLocal && treeData && (
         <Card className="bg-gradient-to-r from-green-50 to-emerald-50 border-green-200 shadow-lg">
           <CardContent className="p-6">
             <h4 className="font-bold text-green-800 mb-3 flex items-center gap-2">
               <Target className="h-5 w-5" />
-              Análise de "{selectedWord}"
+              Análise de "{selectedWordLocal}"
             </h4>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-green-700">
-              <div className="bg-white/50 rounded-xl p-4">
-                <div className="text-2xl font-black text-green-800">{treeStructure.frequency}</div>
-                <div className="text-xs font-semibold">Total de ocorrências</div>
+              <div className="bg-white/60 rounded-xl p-4 shadow">
+                <div className="text-3xl font-black text-green-800">{treeData.count}</div>
+                <div className="text-xs font-semibold">Ocorrências da raiz</div>
               </div>
-              <div className="bg-white/50 rounded-xl p-4">
-                <div className="text-2xl font-black text-green-800">{treeStructure.children.length}</div>
-                <div className="text-xs font-semibold">Contextos únicos</div>
+              <div className="bg-white/60 rounded-xl p-4 shadow">
+                <div className="text-3xl font-black text-green-800">{treeData.children?.length || 0}</div>
+                <div className="text-xs font-semibold">Contextos diretos (Nível 1)</div>
               </div>
-              <div className="bg-white/50 rounded-xl p-4">
-                <div className="text-2xl font-black text-green-800">
-                  {treeStructure.children.reduce((sum, child) => sum + child.children.length, 0)}
+              <div className="bg-white/60 rounded-xl p-4 shadow">
+                <div className="text-3xl font-black text-green-800">
+                  {treeData.children?.reduce((sum, child) => sum + (child.children?.length || 0), 0) || 0}
                 </div>
-                <div className="text-xs font-semibold">Sub-contextos</div>
+                <div className="text-xs font-semibold">Sub-contextos (Nível 2)</div>
               </div>
             </div>
-            <p className="mt-4 text-sm text-green-700">
-              Esta visualização mostra como "{selectedWord}" é usado em diferentes contextos no texto. Tamanhos maiores
-              indicam maior frequência de uso.
+            <p className="mt-4 text-sm text-green-600">
+              A árvore visualiza como "{selectedWordLocal}" se conecta a palavras subsequentes no texto fornecido.
+              O tamanho dos nós e a espessura dos links são influenciados pela frequência e pelas configurações.
             </p>
           </CardContent>
         </Card>
       )}
     </div>
-  )
+  );
 }
